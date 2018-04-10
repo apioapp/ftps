@@ -22,6 +22,7 @@ type FTPS struct {
 	text *textproto.Conn
 
 	Debug     bool
+	Timeout   time.Duration
 	TLSConfig tls.Config
 }
 
@@ -29,7 +30,7 @@ func (ftps *FTPS) Connect(host string, port int) (err error) {
 
 	ftps.host = host
 
-	ftps.conn, err = net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+	ftps.conn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), ftps.Timeout)
 	if err != nil {
 		return err
 	}
@@ -62,6 +63,11 @@ func (ftps *FTPS) isConnEstablished() {
 func (ftps *FTPS) Login(username, password string) (err error) {
 
 	ftps.isConnEstablished()
+
+	_, err = ftps.request("LANG", 200) // encrypt data connection
+	if err != nil {
+		return err
+	}
 
 	_, err = ftps.request(fmt.Sprintf("USER %s", username), 331)
 	if err != nil {
@@ -107,7 +113,7 @@ func (ftps *FTPS) request(cmd string, expected int) (message string, err error) 
 	return
 }
 
-func (ftps *FTPS) requestDataConn(cmd string, expected int) (dataConn net.Conn, err error) {
+func (ftps *FTPS) requestDataConn(cmd string, expected []int) (dataConn net.Conn, err error) {
 
 	port, err := ftps.pasv()
 	if err != nil {
@@ -119,7 +125,7 @@ func (ftps *FTPS) requestDataConn(cmd string, expected int) (dataConn net.Conn, 
 		return nil, err
 	}
 
-	_, err = ftps.request(cmd, expected)
+	_, err = ftps.requestE(cmd, expected)
 	if err != nil {
 		dataConn.Close()
 		return nil, err
@@ -222,7 +228,7 @@ func (ftps *FTPS) List() (entries []Entry, err error) {
 
 	// TODO add support for MLSD
 
-	dataConn, err := ftps.requestDataConn("LIST -a", 150) // TODO use also -L to resolve links?
+	dataConn, err := ftps.requestDataConn("LIST -a", []int{150}) // TODO use also -L to resolve links?
 	if err != nil {
 		return
 	}
@@ -298,9 +304,123 @@ func (ftps *FTPS) parseEntryLine(line string) (entry *Entry, err error) {
 	return
 }
 
+func (ftps *FTPS) requestE(cmd string, expected []int) (message string, err error) {
+
+	ftps.isConnEstablished()
+
+	ftps.debugInfo("<*cmd*> " + cmd)
+
+	_, err = ftps.text.Cmd(cmd)
+	if err != nil {
+		return
+	}
+
+	message, err = ftps.responseE(expected)
+
+	return
+}
+
+func (ftps *FTPS) responseE(expected []int) (message string, err error) {
+
+	ftps.isConnEstablished()
+
+	code, message, err := readResponse(ftps.text, expected)
+
+	ftps.debugInfo(fmt.Sprintf("<*code*> %d", code))
+	ftps.debugInfo("<*message*> " + message)
+
+	return
+}
+
+func parseCodeLine(line string, ee []int) (code int, continued bool, message string, err error) {
+	if len(line) < 4 || line[3] != ' ' && line[3] != '-' {
+		err = textproto.ProtocolError("short response: " + line)
+		return
+	}
+	continued = line[3] == '-'
+	code, err = strconv.Atoi(line[0:3])
+	if err != nil || code < 100 {
+		err = textproto.ProtocolError("invalid response code: " + line)
+		return
+	}
+	message = line[4:]
+	ok := false
+	for _, expectCode := range ee {
+		if 1 <= expectCode && expectCode < 10 && code/100 != expectCode ||
+			10 <= expectCode && expectCode < 100 && code/10 != expectCode ||
+			100 <= expectCode && expectCode < 1000 && code != expectCode {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		err = &textproto.Error{code, message}
+	}
+	return
+}
+
+func (ftps *FTPS) StoreData(remoteFilepath string, data []byte) (err error) {
+	dataConn, err := ftps.requestDataConn(fmt.Sprintf("STOR %s", remoteFilepath), []int{125, 150})
+	if err != nil {
+		return
+	}
+	defer dataConn.Close()
+
+	count, err := dataConn.Write(data)
+	if err != nil {
+		return
+	}
+	dataConn.Close()
+
+	if len(data) != count {
+		return errors.New("file transfer not complete")
+	}
+
+	_, err = ftps.response(226)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+func readCodeLine(r *textproto.Conn, expectCode []int) (code int, continued bool, message string, err error) {
+	line, err := r.ReadLine()
+	if err != nil {
+		return
+	}
+	return parseCodeLine(line, expectCode)
+}
+
+func readResponse(r *textproto.Conn, expectCode []int) (code int, message string, err error) {
+	code, continued, message, err := readCodeLine(r, expectCode)
+	multi := continued
+	for continued {
+		line, err := r.ReadLine()
+		if err != nil {
+			return 0, "", err
+		}
+
+		var code2 int
+		var moreMessage string
+		code2, continued, moreMessage, err = parseCodeLine(line, []int{0})
+		if err != nil || code2 != code {
+			message += "\n" + strings.TrimRight(line, "\r\n")
+			continued = true
+			continue
+		}
+		message += "\n" + moreMessage
+	}
+	if err != nil && multi && message != "" {
+		// replace one line error message with all lines (full message)
+		err = &textproto.Error{code, message}
+	}
+	return
+}
+
 func (ftps *FTPS) StoreFile(remoteFilepath string, f *os.File) (err error) {
 
-	dataConn, err := ftps.requestDataConn(fmt.Sprintf("STOR %s", remoteFilepath), 150)
+	dataConn, err := ftps.requestDataConn(fmt.Sprintf("STOR %s", remoteFilepath), []int{125, 150})
 	if err != nil {
 		return
 	}
@@ -325,7 +445,7 @@ func (ftps *FTPS) StoreFile(remoteFilepath string, f *os.File) (err error) {
 
 func (ftps *FTPS) RetrieveFile(remoteFilepath string, file *os.File) (err error) {
 
-	dataConn, err := ftps.requestDataConn(fmt.Sprintf("RETR %s", remoteFilepath), 150)
+	dataConn, err := ftps.requestDataConn(fmt.Sprintf("RETR %s", remoteFilepath), []int{150})
 	if err != nil {
 		return
 	}
@@ -358,7 +478,7 @@ func (ftps *FTPS) Quit() (err error) {
 
 func (ftps *FTPS) openDataConn(port int) (dataConn net.Conn, err error) {
 
-	dataConn, err = net.Dial("tcp", fmt.Sprintf("%s:%d", ftps.host, port))
+	dataConn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ftps.host, port), ftps.Timeout)
 	if err != nil {
 		return
 	}
