@@ -1,15 +1,17 @@
 # FTPS Implementation for Go
 
-
 ## Information
+
 This implementation does not implement the full FTP/FTPS specification. Only a small subset.
 
 I have not done a security review of the code, yet. Therefore no guarantee is given. It would be nice if somebody could do a security review and report back if the implementation is vulnerable.
 
 ## Installation
-	go get github.com/shoobyban/ftps
+
+    go get github.com/shoobyban/ftps
 
 ## Usage
+
 ```go
 	ftps := new(FTPS)
 
@@ -40,4 +42,7 @@ I have not done a security review of the code, yet. Therefore no guarantee is gi
 ```
 
 ## Credits
+
 This is a fork of (https://github.com/sacloud/ftps), that is originally fork of (https://github.com/marcobeierer/ftps), that was inspired by the work of jlaffaye (https://github.com/jlaffaye/ftp) and smallfish (https://github.com/smallfish/ftp).
+
+## Update
