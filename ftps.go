@@ -465,6 +465,17 @@ func (ftps *FTPS) RetrieveFile(remoteFilepath string, file *os.File) (err error)
 	return
 }
 
+// Rename renames a file on the remote FTPS server.
+func (ftps *FTPS) Rename(from, to string) error {
+	_, err := ftps.requestDataConn(fmt.Sprintf("RNFR %s", from), []int{350})
+	if err != nil {
+		return err
+	}
+
+	_, err = ftps.requestDataConn(fmt.Sprintf("RNTO %s", from), []int{250})
+	return err
+}
+
 func (ftps *FTPS) Quit() (err error) {
 
 	_, err = ftps.request("QUIT", 221)
